@@ -7,6 +7,8 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+import os
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 import joblib
 import numpy as np
 import pandas as pd
@@ -60,7 +62,7 @@ def _read_json(path: str | Path, default: Any = None) -> Any:
 def load_artifacts():
     missing = [p for p in REQUIRED if not Path(p).exists()]
     if tf is None:
-        missing.append("tensorflow / keras runtime")
+        missing.append("tensorflow / keras runtime — install tensorflow-cpu>=2.21,<2.22 for Python 3.13, or redeploy with Python 3.11 for older TensorFlow")
     if missing:
         return None, None, None, missing
     allocation_model = tf.keras.models.load_model("allocation_model.keras")

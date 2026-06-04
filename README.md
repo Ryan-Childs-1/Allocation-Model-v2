@@ -1,22 +1,27 @@
-# Deployment fix
-
-This package includes `runtime.txt` pinned to `python-3.11` and a Streamlit Cloud-safe `requirements.txt`. This avoids Python 3.14 source builds for `scikit-learn` and TensorFlow/Keras install incompatibilities.
-
 # Allocation AI — Keras FLM Ranker Streamlit App
 
-This is the final Streamlit runtime app built around two separate Keras neural networks:
+This build is fixed for Streamlit Community Cloud environments that default to Python 3.13.
 
-1. `allocation_model.keras` — ranks individual FLM units from most-deserving to least-deserving.
-2. `deallocation_model.keras` — removes FLM units when the first allocation pass exceeds DC availability.
+## Why this version exists
 
-The app accepts `.xlsb`, `.xlsx`, `.xls`, and `.csv` allocation files and outputs a scored file with:
+The previous app pinned `tensorflow-cpu==2.16.1` and `numpy<2.0`. Streamlit Cloud ran Python 3.13, where those pins do not have compatible wheels. That forced package builds from source or made TensorFlow unsatisfiable.
 
-- `AI Starting Left DC`
-- `AI Allocation Before Deallocation`
-- `AI Deallocation Units`
-- `AI DC Safety Cut`
-- `AI Final Alloc`
-- `AI Left DC`
+This package uses Python 3.13-compatible dependency pins:
+
+- `tensorflow-cpu>=2.21,<2.22`
+- `numpy>=2.1,<2.3`
+- `scikit-learn>=1.7,<1.8`
+- `pandas>=2.2.3,<2.4`
+
+## Files required
+
+- `app.py`
+- `base_features.py`
+- `model_utils.py`
+- `allocation_model.keras`
+- `deallocation_model.keras`
+- `preprocessing_pipeline.joblib`
+- `requirements.txt`
 
 ## Run locally
 
@@ -25,27 +30,8 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Deploy to Streamlit Cloud
+## Streamlit Cloud notes
 
-Upload all files in this folder to one flat GitHub repo and deploy `app.py`.
+If Streamlit Cloud still selects a different Python version, delete and redeploy the app and choose Python 3.13 or Python 3.11 in Advanced settings. This package is designed to work with Python 3.13.
 
-## Included diagnostics
-
-The app includes tabs for:
-
-- Running the allocation/deallocation models on a new file
-- Execution insights after scoring
-- Training metrics and epoch logs
-- Feature insight and candidate names
-- Keras model architecture
-- Cutoff sweep and validation evaluation
-
-## Required artifacts
-
-These files must stay next to `app.py`:
-
-- `allocation_model.keras`
-- `deallocation_model.keras`
-- `preprocessing_pipeline.joblib`
-- `base_features.py`
-- `model_utils.py`
+The app accepts `.xlsb`, `.xlsx`, `.xls`, or `.csv` allocation files and outputs AI allocation/deallocation columns while forcing `AI Left DC >= 0`.
