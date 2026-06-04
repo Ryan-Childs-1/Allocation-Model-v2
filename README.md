@@ -1,25 +1,23 @@
-# Allocation AI — Keras FLM Ranker Streamlit App
+# Allocation AI — TensorFlow-Free Streamlit Runtime
 
-This build is fixed for Streamlit Community Cloud environments that default to Python 3.13.
+This package is a deployment-safe version of the two-network Keras FLM ranker app.
 
 ## Why this version exists
 
-The previous app pinned `tensorflow-cpu==2.16.1` and `numpy<2.0`. Streamlit Cloud ran Python 3.13, where those pins do not have compatible wheels. That forced package builds from source or made TensorFlow unsatisfiable.
+Streamlit Cloud was failing while trying to install TensorFlow/Keras under Python 3.13. This version avoids that dependency entirely. The trained `.keras` networks were exported into compressed NumPy weight files:
 
-This package uses Python 3.13-compatible dependency pins:
+- `allocation_model.npz`
+- `deallocation_model.npz`
 
-- `tensorflow-cpu>=2.21,<2.22`
-- `numpy>=2.1,<2.3`
-- `scikit-learn>=1.7,<1.8`
-- `pandas>=2.2.3,<2.4`
+The app performs the same Dense + BatchNorm + Swish/Sigmoid forward pass in NumPy, so the deployment no longer needs TensorFlow.
 
-## Files required
+## Required files
 
 - `app.py`
 - `base_features.py`
 - `model_utils.py`
-- `allocation_model.keras`
-- `deallocation_model.keras`
+- `allocation_model.npz`
+- `deallocation_model.npz`
 - `preprocessing_pipeline.joblib`
 - `requirements.txt`
 
@@ -30,8 +28,15 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Streamlit Cloud notes
+## Deploy to Streamlit Cloud
 
-If Streamlit Cloud still selects a different Python version, delete and redeploy the app and choose Python 3.13 or Python 3.11 in Advanced settings. This package is designed to work with Python 3.13.
+Use `app.py` as the entry point. No TensorFlow dependency is required.
 
-The app accepts `.xlsb`, `.xlsx`, `.xls`, or `.csv` allocation files and outputs AI allocation/deallocation columns while forcing `AI Left DC >= 0`.
+## Model method
+
+The app uses two separate neural networks:
+
+1. Allocation network ranks each potential FLM unit.
+2. Deallocation network removes FLM units from rows/groups that exceed DC availability.
+
+The final safety pass ensures `AI Left DC >= 0`.

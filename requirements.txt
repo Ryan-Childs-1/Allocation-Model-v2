@@ -1,5 +1,4 @@
-# Streamlit Community Cloud Python 3.13-compatible runtime.
-# Use current wheels so Streamlit does not try to compile numpy/sklearn from source.
+# TensorFlow-free Streamlit runtime. Uses exported NumPy weights instead of .keras loading.
 streamlit>=1.49,<2
 pandas>=2.2.3,<2.4
 numpy>=2.1,<2.3
@@ -9,5 +8,3 @@ joblib>=1.4,<2
 pyxlsb==1.0.10
 openpyxl>=3.1,<4
 plotly>=5.24,<7
-# TensorFlow 2.16 does not support Python 3.13. TensorFlow 2.21+ provides cp313 wheels.
-tensorflow-cpu>=2.21,<2.22

@@ -3,34 +3,24 @@ from __future__ import annotations
 import io
 import json
 import tempfile
-import zipfile
 from pathlib import Path
 from typing import Any
 
-import os
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 import joblib
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 try:
-    import tensorflow as tf
-except Exception:  # Streamlit should still render setup guidance if TF is unavailable.
-    tf = None
-
-try:
     import plotly.express as px
-    import plotly.graph_objects as go
 except Exception:
     px = None
-    go = None
 
 from base_features import add_features, read_xlsb
-from model_utils import score_dataframe_core
+from model_utils import load_numpy_model, score_dataframe_core
 
-APP_TITLE = "Allocation AI — Keras FLM Ranker"
-REQUIRED = ["allocation_model.keras", "deallocation_model.keras", "preprocessing_pipeline.joblib"]
+APP_TITLE = "Allocation AI — FLM Ranker, TensorFlow-Free"
+REQUIRED = ["allocation_model.npz", "deallocation_model.npz", "preprocessing_pipeline.joblib"]
 METRIC_FILES = {
     "Allocation epoch log": "allocation_model_keras_epoch_log.csv",
     "Deallocation epoch log": "deallocation_model_keras_epoch_log.csv",
@@ -61,12 +51,10 @@ def _read_json(path: str | Path, default: Any = None) -> Any:
 @st.cache_resource(show_spinner=False)
 def load_artifacts():
     missing = [p for p in REQUIRED if not Path(p).exists()]
-    if tf is None:
-        missing.append("tensorflow / keras runtime — install tensorflow-cpu>=2.21,<2.22 for Python 3.13, or redeploy with Python 3.11 for older TensorFlow")
     if missing:
         return None, None, None, missing
-    allocation_model = tf.keras.models.load_model("allocation_model.keras")
-    deallocation_model = tf.keras.models.load_model("deallocation_model.keras")
+    allocation_model = load_numpy_model("allocation_model.npz")
+    deallocation_model = load_numpy_model("deallocation_model.npz")
     bundle = joblib.load("preprocessing_pipeline.joblib")
     return allocation_model, deallocation_model, bundle, []
 
@@ -93,38 +81,11 @@ def read_upload(uploaded):
         finally:
             Path(tmp_path).unlink(missing_ok=True)
     if name.endswith((".xlsx", ".xls")):
-        # Most allocation workbooks use row 2 as the header on this sheet.
         try:
             return pd.read_excel(uploaded, sheet_name="3.3 Working Table", header=1)
         except Exception:
             return pd.read_excel(uploaded, header=0)
     return pd.read_csv(uploaded)
-
-
-def model_input_dim(model) -> int | str:
-    try:
-        shape = model.input_shape
-        if isinstance(shape, list):
-            shape = shape[0]
-        return int(shape[-1])
-    except Exception:
-        return "Unknown"
-
-
-def model_layer_table(model) -> pd.DataFrame:
-    rows = []
-    for i, layer in enumerate(getattr(model, "layers", []), start=1):
-        cfg = layer.get_config() if hasattr(layer, "get_config") else {}
-        rows.append({
-            "#": i,
-            "layer": layer.__class__.__name__,
-            "name": getattr(layer, "name", ""),
-            "units": cfg.get("units", ""),
-            "activation": cfg.get("activation", ""),
-            "dropout/rate": cfg.get("rate", ""),
-            "parameters": int(layer.count_params()) if hasattr(layer, "count_params") else "",
-        })
-    return pd.DataFrame(rows)
 
 
 def render_metric_cards(result: pd.DataFrame):
@@ -167,16 +128,18 @@ def summarize_scored(result: pd.DataFrame) -> pd.DataFrame:
             ("Rows where AI > Alloc. Rec.", int((final > rec).sum())),
             ("Rows where AI < Alloc. Rec.", int((final < rec).sum())),
         ])
-    if "Final Alloc." in result.columns and _num(result["Final Alloc."]).sum() > 0:
-        actual = _num(result["Final Alloc."])
-        mask = actual.notna()
-        err = final - actual
-        rows.extend([
-            ("Actual Final Alloc units", int(actual.sum())),
-            ("AI MAE vs existing Final Alloc", round(float(np.abs(err[mask]).mean()), 3)),
-            ("AI bias vs existing Final Alloc", round(float(err[mask].mean()), 3)),
-            ("Exact matches vs existing Final Alloc", int((final[mask] == actual[mask]).sum())),
-        ])
+    if "Final Alloc." in result.columns:
+        actual_raw = pd.to_numeric(result["Final Alloc."], errors="coerce")
+        mask = actual_raw.notna()
+        if mask.any():
+            actual = actual_raw.fillna(0)
+            err = final - actual
+            rows.extend([
+                ("Actual Final Alloc units", int(actual.sum())),
+                ("AI MAE vs existing Final Alloc", round(float(np.abs(err[mask]).mean()), 3)),
+                ("AI bias vs existing Final Alloc", round(float(err[mask].mean()), 3)),
+                ("Exact matches vs existing Final Alloc", int((final[mask] == actual[mask]).sum())),
+            ])
     return pd.DataFrame(rows, columns=["Insight", "Value"])
 
 
@@ -200,6 +163,8 @@ def plot_line(df: pd.DataFrame, cols: list[str], title: str):
 
 def feature_family(name: str) -> str:
     n = str(name)
+    if n.startswith("t_"):
+        return "Per-FLM token features"
     if "cand" in n:
         return "FLM candidate features"
     if any(x in n for x in ["gap", "demand", "woc", "weekly", "l30", "d30", "d60", "ttm", "lw"]):
@@ -218,203 +183,153 @@ def feature_family(name: str) -> str:
 
 
 st.title(APP_TITLE)
-st.caption("Two separate Keras neural networks: one ranks individual FLMs to allocate, and one ranks FLMs to remove when DC is exceeded.")
+st.caption("Two separate neural networks exported from Keras to NumPy weights: allocation FLM ranker + deallocation FLM remover. No TensorFlow install required.")
 
 allocation_model, deallocation_model, bundle, missing = load_artifacts()
 if missing:
-    st.error("Required runtime artifacts are missing or TensorFlow is not installed.")
-    st.write("Add/install the following and restart Streamlit:")
-    st.code("\n".join(missing))
+    st.error("The app is missing required runtime artifacts.")
+    for m in missing:
+        st.code(m)
     st.stop()
 
-metrics = _read_json("model_metrics.json", {}) or {}
-alloc_last = _read_json("allocation_model_last_epoch.json", {}) or {}
-dealloc_last = _read_json("deallocation_model_last_epoch.json", {}) or {}
+metrics = _read_json("model_metrics.json", {})
+alloc_last = _read_json("allocation_model_last_epoch.json", {})
+dealloc_last = _read_json("deallocation_model_last_epoch.json", {})
 
 with st.sidebar:
-    st.header("Model status")
-    st.success("Artifacts loaded")
-    st.metric("Allocation inputs", model_input_dim(allocation_model))
-    st.metric("Deallocation inputs", model_input_dim(deallocation_model))
-    st.metric("Allocation cutoff", f"{float(bundle.get('allocation_cutoff', 0.5)):.3f}")
-    st.metric("Max FLMs / row", int(bundle.get("max_units_per_row", 20)))
+    st.header("Model runtime")
+    st.success("TensorFlow-free NumPy inference")
+    st.metric("Allocation input dim", allocation_model.input_shape[-1])
+    st.metric("Deallocation input dim", deallocation_model.input_shape[-1])
+    st.metric("Allocation cutoff", bundle.get("allocation_cutoff", "not saved"))
+    st.metric("Max FLMs per row", bundle.get("max_units_per_row", 20))
     st.divider()
-    st.caption("Core artifacts")
-    for p in REQUIRED:
-        st.write(f"✓ `{p}`")
+    st.caption("Runtime files")
+    for f in REQUIRED:
+        st.write(f"✅ `{f}`")
 
-summary_cols = st.columns(4)
-summary_cols[0].metric("Allocation Val AUC", f"{float(alloc_last.get('val_auc', 0)):.4f}" if alloc_last else "N/A")
-summary_cols[1].metric("Allocation Val Recall", f"{float(alloc_last.get('val_recall', 0)):.4f}" if alloc_last else "N/A")
-summary_cols[2].metric("Deallocation Val AUC", f"{float(dealloc_last.get('val_auc', 0)):.4f}" if dealloc_last else "N/A")
-summary_cols[3].metric("Deallocation Val Accuracy", f"{float(dealloc_last.get('val_accuracy', 0)):.4f}" if dealloc_last else "N/A")
+tabs = st.tabs(["Run Models", "Execution Insights", "Training Metrics", "Feature Insight", "Model Architecture", "Evaluation", "Method"])
 
-tab_score, tab_exec, tab_train, tab_features, tab_models, tab_eval, tab_about = st.tabs([
-    "Run Models", "Execution Insights", "Training Metrics", "Feature Insight", "Model Architecture", "Evaluation", "Method"
-])
+if "scored_result" not in st.session_state:
+    st.session_state.scored_result = None
 
-if "last_result" not in st.session_state:
-    st.session_state.last_result = None
-if "last_uploaded_name" not in st.session_state:
-    st.session_state.last_uploaded_name = None
-
-with tab_score:
-    st.subheader("Score a new allocation file")
-    st.write("Upload a `.xlsb`, `.xlsx`, `.xls`, or `.csv` allocation file. The app will engineer features, rank FLMs, apply the optimal cutoff, deallocate excess, and return the scored table.")
+with tabs[0]:
+    st.subheader("Run allocation and deallocation models")
     uploaded = st.file_uploader("Upload allocation workbook or CSV", type=["xlsb", "xlsx", "xls", "csv"])
-    if uploaded is not None:
+    if uploaded:
         df = read_upload(uploaded)
-        st.success(f"Loaded {len(df):,} rows from `{uploaded.name}`")
-        with st.expander("Input preview", expanded=False):
-            st.dataframe(df.head(250), use_container_width=True, height=300)
-        with st.spinner("Running Keras allocation ranker, deallocation ranker, and DC safety pass..."):
-            result = score_dataframe_core(df, allocation_model, deallocation_model, bundle)
-        st.session_state.last_result = result
-        st.session_state.last_uploaded_name = uploaded.name
+        st.success(f"Loaded {len(df):,} rows from {uploaded.name}")
+        with st.expander("Preview uploaded data", expanded=False):
+            st.dataframe(df.head(100), use_container_width=True)
+        if st.button("Score file", type="primary"):
+            with st.spinner("Scoring FLM tokens, ranking allocations, and correcting DC..."):
+                result = score_dataframe_core(df, allocation_model, deallocation_model, bundle)
+            st.session_state.scored_result = result
+            st.success("Scoring complete.")
+    if st.session_state.scored_result is not None:
+        result = st.session_state.scored_result
         render_metric_cards(result)
-        st.markdown("### Scored output")
-        st.dataframe(result, use_container_width=True, height=620)
-        c1, c2, c3 = st.columns(3)
-        c1.download_button("Download scored CSV", result.to_csv(index=False).encode("utf-8"), file_name="allocation_ai_keras_scored.csv", mime="text/csv")
-        c2.download_button("Download scored Excel", to_excel_bytes(result), file_name="allocation_ai_keras_scored.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        diag = summarize_scored(result)
-        c3.download_button("Download insights CSV", diag.to_csv(index=False).encode("utf-8"), file_name="allocation_ai_execution_insights.csv", mime="text/csv")
-    else:
-        st.info("Upload a file to run the two-network allocation/deallocation system.")
+        st.dataframe(result, use_container_width=True, height=550)
+        c1, c2 = st.columns(2)
+        c1.download_button("Download scored CSV", result.to_csv(index=False).encode("utf-8"), "allocation_ai_scored.csv", "text/csv")
+        c2.download_button("Download scored Excel", to_excel_bytes(result), "allocation_ai_scored.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-with tab_exec:
-    st.subheader("Execution insights from latest run")
-    result = st.session_state.last_result
+with tabs[1]:
+    st.subheader("Model execution insights")
+    result = st.session_state.scored_result
     if result is None:
-        st.info("Run a file on the **Run Models** tab to populate execution insights.")
+        st.info("Run a file on the Run Models tab to populate execution insights.")
     else:
-        st.caption(f"Latest file: `{st.session_state.last_uploaded_name}`")
         render_metric_cards(result)
-        insights = summarize_scored(result)
-        st.dataframe(insights, use_container_width=True, height=420)
+        st.dataframe(summarize_scored(result), use_container_width=True, hide_index=True)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("#### Top AI allocations")
+            cols = [c for c in ["Item", "Site", "Flag", "Description", "AI Final Alloc", "AI Allocation Before Deallocation", "AI Left DC", "Alloc. Rec."] if c in result.columns]
+            st.dataframe(result.sort_values("AI Final Alloc", ascending=False)[cols].head(50), use_container_width=True)
+        with c2:
+            st.markdown("#### Top deallocations / safety cuts")
+            cols = [c for c in ["Item", "Site", "Flag", "Description", "AI Deallocation Units", "AI DC Safety Cut", "AI Final Alloc", "AI Left DC"] if c in result.columns]
+            temp = result.assign(_cut=_num(result.get("AI Deallocation Units", pd.Series(0))) + _num(result.get("AI DC Safety Cut", pd.Series(0))))
+            st.dataframe(temp.sort_values("_cut", ascending=False)[cols].head(50), use_container_width=True)
         if px is not None:
-            # Allocation distribution chart.
-            plot_df = result.copy()
-            plot_df["AI Final Alloc"] = _num(plot_df["AI Final Alloc"])
-            plot_df["AI Deallocation Units"] = _num(plot_df["AI Deallocation Units"])
-            if "Flag" in plot_df.columns:
-                by_flag = plot_df.groupby(plot_df["Flag"].fillna("Blank").astype(str), dropna=False).agg(
-                    rows=("AI Final Alloc", "size"),
-                    ai_final_alloc=("AI Final Alloc", "sum"),
-                    deallocated=("AI Deallocation Units", "sum"),
-                ).reset_index().sort_values("ai_final_alloc", ascending=False).head(20)
-                fig = px.bar(by_flag, x="Flag", y=["ai_final_alloc", "deallocated"], title="AI allocation and deallocation by Flag", barmode="group")
-                st.plotly_chart(fig, use_container_width=True)
-            top_cols = [c for c in ["Item", "Description", "Site", "Flag", "Alloc. Rec.", "AI Allocation Before Deallocation", "AI Deallocation Units", "AI Final Alloc", "AI Left DC"] if c in result.columns]
-            st.markdown("#### Top allocations")
-            st.dataframe(result.assign(_ai=_num(result["AI Final Alloc"])).sort_values("_ai", ascending=False)[top_cols].head(50), use_container_width=True, height=350)
-            st.markdown("#### Largest deallocations")
-            st.dataframe(result.assign(_de=_num(result["AI Deallocation Units"])).sort_values("_de", ascending=False)[top_cols].head(50), use_container_width=True, height=350)
+            chart = summarize_scored(result)
+            numeric_rows = chart[pd.to_numeric(chart["Value"], errors="coerce").notna()].copy()
+            numeric_rows["Value"] = pd.to_numeric(numeric_rows["Value"], errors="coerce")
+            fig = px.bar(numeric_rows.head(12), x="Value", y="Insight", orientation="h", title="Execution summary")
+            st.plotly_chart(fig, use_container_width=True)
 
-with tab_train:
+with tabs[2]:
     st.subheader("Training metrics")
-    st.write("These metrics come from the uploaded Keras training logs and last-epoch JSON files.")
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("### Allocation network last epoch")
-        st.json(alloc_last or {})
+        st.markdown("#### Allocation last epoch")
+        st.json(alloc_last or {"status": "not available"})
     with c2:
-        st.markdown("### Deallocation network last epoch")
-        st.json(dealloc_last or {})
+        st.markdown("#### Deallocation last epoch")
+        st.json(dealloc_last or {"status": "not available"})
+    for label, path in METRIC_FILES.items():
+        dfm = load_csv_if_exists(path)
+        if dfm is not None:
+            with st.expander(label, expanded=label in ["Allocation epoch log", "Deallocation epoch log"]):
+                st.dataframe(dfm, use_container_width=True)
+                metric_cols = [c for c in dfm.columns if c.startswith("val_") and pd.api.types.is_numeric_dtype(dfm[c])]
+                if "epoch" in dfm.columns and metric_cols:
+                    plot_line(dfm, metric_cols[:4], f"{label} validation metrics")
 
-    for title, path in [("Allocation network", "allocation_model_keras_epoch_log.csv"), ("Deallocation network", "deallocation_model_keras_epoch_log.csv")]:
-        hist = load_csv_if_exists(path)
-        if hist is not None and not hist.empty:
-            st.markdown(f"### {title} epoch log")
-            st.dataframe(hist.tail(30), use_container_width=True)
-            if "epoch" in hist.columns:
-                for cols, label in [(["loss", "val_loss"], "Loss"), (["auc", "val_auc"], "AUC"), (["precision", "val_precision", "recall", "val_recall"], "Precision / Recall")]:
-                    use_cols = [c for c in cols if c in hist.columns]
-                    if use_cols:
-                        plot_line(hist, use_cols, f"{title}: {label}")
-
-with tab_features:
-    st.subheader("Training feature insight")
-    nf = list(bundle.get("num_features", []))
-    cf = list(bundle.get("cat_features", []))
-    transformed = model_input_dim(allocation_model)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Numeric features", len(nf))
-    c2.metric("Categorical features", len(cf))
-    c3.metric("Transformed inputs", transformed)
-    c4.metric("Candidate names", len(bundle.get("candidate_names", [])))
-    st.markdown("#### Feature families")
-    fam = pd.DataFrame({"feature": nf, "family": [feature_family(x) for x in nf]})
-    fam_counts = fam.groupby("family").size().reset_index(name="count").sort_values("count", ascending=False)
-    if px is not None:
-        fig = px.bar(fam_counts, x="family", y="count", title="Numeric engineered features by family")
-        st.plotly_chart(fig, use_container_width=True)
-    st.dataframe(fam_counts, use_container_width=True)
-    st.markdown("#### Numeric features")
-    st.dataframe(fam, use_container_width=True, height=350)
+with tabs[3]:
+    st.subheader("Feature insight")
+    num_features = bundle.get("num_features", [])
+    cat_features = bundle.get("cat_features", [])
+    st.write(f"The deployed preprocessing bundle uses **{len(num_features)} numeric/token features** and **{len(cat_features)} categorical features** before one-hot expansion.")
+    feature_df = pd.DataFrame({"feature": num_features, "family": [feature_family(f) for f in num_features]})
+    family_counts = feature_df.groupby("family", as_index=False).size().rename(columns={"size": "count"}).sort_values("count", ascending=False)
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.dataframe(family_counts, use_container_width=True, hide_index=True)
+    with c2:
+        if px is not None and not family_counts.empty:
+            fig = px.bar(family_counts, x="count", y="family", orientation="h", title="Feature families")
+            st.plotly_chart(fig, use_container_width=True)
+    st.markdown("#### Numeric/token features")
+    st.dataframe(feature_df, use_container_width=True, hide_index=True)
     st.markdown("#### Categorical features")
-    st.dataframe(pd.DataFrame({"categorical_feature": cf}), use_container_width=True, height=260)
-    st.markdown("#### FLM candidates / token logic")
-    st.dataframe(pd.DataFrame({"candidate": bundle.get("candidate_names", [])}), use_container_width=True)
+    st.dataframe(pd.DataFrame({"categorical_feature": cat_features}), use_container_width=True, hide_index=True)
 
-with tab_models:
+with tabs[4]:
     st.subheader("Model architecture")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("### Allocation model")
-        st.metric("Parameters", f"{allocation_model.count_params():,}")
-        st.metric("Input dimension", model_input_dim(allocation_model))
-        st.dataframe(model_layer_table(allocation_model), use_container_width=True, height=420)
-    with c2:
-        st.markdown("### Deallocation model")
-        st.metric("Parameters", f"{deallocation_model.count_params():,}")
-        st.metric("Input dimension", model_input_dim(deallocation_model))
-        st.dataframe(model_layer_table(deallocation_model), use_container_width=True, height=420)
+    for label, model in [("Allocation model", allocation_model), ("Deallocation model", deallocation_model)]:
+        info = model.summary_dict()
+        st.markdown(f"#### {label}: `{info['name']}`")
+        c1, c2 = st.columns(2)
+        c1.metric("Input features", info["input_dim"])
+        c2.metric("Parameters", f"{info['parameter_count']:,}")
+        st.dataframe(pd.DataFrame(info["layers"]), use_container_width=True, hide_index=True)
 
-with tab_eval:
-    st.subheader("Evaluation and cutoff selection")
-    sweep = load_csv_if_exists("allocation_cutoff_sweep.csv")
-    if sweep is not None and not sweep.empty:
-        st.markdown("### Allocation cutoff sweep")
-        st.dataframe(sweep, use_container_width=True)
-        if "mae_before_deallocation" in sweep.columns:
-            best = sweep.sort_values("mae_before_deallocation").head(1).iloc[0]
-            st.success(f"Best cutoff in sweep: {float(best['cutoff']):.3f} with validation MAE {float(best['mae_before_deallocation']):.4f}")
-            if px is not None:
-                fig = px.line(sweep, x="cutoff", y="mae_before_deallocation", markers=True, title="Validation MAE by allocation cutoff")
-                st.plotly_chart(fig, use_container_width=True)
-    eval_df = load_csv_if_exists("file_level_evaluation.csv")
-    if eval_df is not None and not eval_df.empty:
-        st.markdown("### File-level evaluation")
-        st.dataframe(eval_df, use_container_width=True)
-    preview = load_csv_if_exists("validation_scored_preview.csv")
-    if preview is not None and not preview.empty:
-        st.markdown("### Validation scored preview")
-        st.dataframe(preview.head(500), use_container_width=True, height=400)
+with tabs[5]:
+    st.subheader("Evaluation artifacts")
     if metrics:
-        with st.expander("Raw model_metrics.json", expanded=False):
-            st.json(metrics)
+        st.markdown("#### model_metrics.json")
+        st.json(metrics)
+    for label, path in [
+        ("Cutoff sweep", "allocation_cutoff_sweep.csv"),
+        ("File-level evaluation", "file_level_evaluation.csv"),
+        ("Validation scored preview", "validation_scored_preview.csv"),
+    ]:
+        dfm = load_csv_if_exists(path)
+        if dfm is not None:
+            with st.expander(label, expanded=True):
+                st.dataframe(dfm, use_container_width=True)
 
-with tab_about:
-    st.subheader("How this app works")
-    st.markdown(
-        """
-This app uses the rebuilt two-network Keras approach:
+with tabs[6]:
+    st.subheader("Method")
+    st.markdown("""
+This deployment uses the two-network FLM-ranking method without installing TensorFlow:
 
-1. **Allocation network** — expands each row into possible individual FLM tokens, scores each token, ranks the FLMs, and keeps only FLMs above the optimized cutoff.
-2. **Cutoff optimizer** — uses the saved validation sweep to select the cutoff that best matched historical `Final Alloc.` before deallocation.
-3. **Deallocation network** — looks only at allocated FLM tokens where the first pass creates DC pressure and removes the least deserving / highest-removal-probability FLMs.
-4. **DC safety pass** — guarantees the final `AI Left DC` is never negative.
+1. **Allocation network** scores every possible FLM token for each row. A row can receive FLM 1, FLM 2, FLM 3, and so on only when the token score clears the saved cutoff.
+2. **Cutoff rule** selects how far down the ranked FLM list the app should allocate.
+3. **Deallocation network** scores allocated FLM tokens for removal when the first-pass result exceeds item/DC availability.
+4. **Final DC safety pass** removes any remaining excess so `AI Left DC` always stays zero or positive.
 
-The app outputs the original dataset plus:
-
-- `AI Starting Left DC`
-- `AI Allocation Before Deallocation`
-- `AI Deallocation Units`
-- `AI DC Safety Cut`
-- `AI Final Alloc`
-- `AI Left DC`
-- `AI Allocated FLMs Before Deallocation`
-- `AI Allocation Cutoff`
-"""
-    )
+The original Keras weights were exported into `.npz` files and are evaluated with NumPy. This keeps the same trained networks but avoids TensorFlow installation failures on Streamlit Cloud.
+""")
