@@ -1,10 +1,12 @@
-streamlit>=1.32
-pandas>=2.0
-numpy>=1.24
-scikit-learn>=1.3,<1.6
-joblib>=1.3
-pyxlsb>=1.0.10
-openpyxl>=3.1
-tensorflow>=2.15
-keras>=2.15
-plotly>=5.18
+# Streamlit Cloud / Python 3.11 compatible pins.
+# The previous broad pins let Streamlit pick Python 3.14, which forced scikit-learn
+# to compile from source and caused the deployment to appear stuck.
+streamlit>=1.32,<2
+pandas>=2.1,<2.3
+numpy>=1.26,<2.0
+scikit-learn>=1.4,<1.6
+joblib>=1.3,<2
+pyxlsb==1.0.10
+openpyxl>=3.1,<4
+tensorflow-cpu==2.16.1
+plotly>=5.18,<6

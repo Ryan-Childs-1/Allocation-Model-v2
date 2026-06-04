@@ -1,3 +1,7 @@
+# Deployment fix
+
+This package includes `runtime.txt` pinned to `python-3.11` and a Streamlit Cloud-safe `requirements.txt`. This avoids Python 3.14 source builds for `scikit-learn` and TensorFlow/Keras install incompatibilities.
+
 # Allocation AI — Keras FLM Ranker Streamlit App
 
 This is the final Streamlit runtime app built around two separate Keras neural networks:
